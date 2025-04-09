@@ -1,8 +1,10 @@
 # FamilyTool
-FamilyTool: A Multi-hop Personalized Tool Use Benchmark
+FamilyTool: A Multi-hop Personalized Tool Use Benchmark.
+
+Pipeline code comming soon.
 ## Data Path
 ### Query-Answer Pair
-For dataset name as $DATASET, data with golden KG is put in '```datasets/$DATASET/data_goldenKG.jsonl```. Data format for each line is 
+For dataset name as $DATASET, data with golden subKG is put in '```datasets/$DATASET/data_goldenKG.jsonl```. Data format for each line is 
 ```
 [
         {"role": "id", "content": "$id"},
@@ -12,6 +14,9 @@ For dataset name as $DATASET, data with golden KG is put in '```datasets/$DATASE
             $golden_answer_dict
         ]}
     ]
+
 ```
+
+The golden subKG used for each sample can be extracted by regular expression.
 ### KG
 KG is put in ```KG/familykg.txt```. Each line is a link in KG.
