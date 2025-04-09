@@ -19,4 +19,4 @@ For dataset name as $DATASET, data with golden subKG is put in '```datasets/$DAT
 
 The golden subKG used for each sample can be extracted by regular expression.
 ### KG
-KG is put in ```KG/familykg.txt```. Each line is a link in KG.
+KG is put in ```KG/familykg.txt```. Each line is a triple in KG.
