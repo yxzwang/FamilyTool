@@ -204,8 +204,8 @@ def rewrite_entry(KG, processed_datas,args):
         data["error"] = error
         rewrite_result.append(data)
     # 释放显存
-    if tokenizer != None:
-        vllm_release_memory(model)
+    # if tokenizer != None:
+    #     vllm_release_memory(model)
     save_json_file(rewrite_result, rewrite_result_file)
     return rewrite_result
 def transform_query_with_kg(original_query):
