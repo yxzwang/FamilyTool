@@ -4,10 +4,34 @@ from collections import defaultdict
 import re
 import json
 import argparse
-from extract_true_KG import extract_links_func 
 from utils import save_json_file
 familykg=KnowledgeGraph()
 familykg.loadfromdisk("KGs/familykg.txt")
+def extract_links_func(inputstring):
+    inputstring=clean_links(inputstring)
+    # match = re.findall(r'\[(.*?)\]', inputstring)
+    match=re.findall(r'\[([^\[\]]+)\]',inputstring)
+    try:
+        result_list=[]
+        for content in match:
+            newcontent=[item.strip() for item in content.split(",")]
+            result_list.append(newcontent)
+    except:
+        import ipdb
+        ipdb.set_trace()
+    return result_list
+
+def clean_links(linkstr:str):
+    return linkstr.replace("\'","").replace("\"","")
+def extract_used_KG(datas):
+    used_KG=KnowledgeGraph()
+    for data in datas:
+        links=extract_links_func(data["kg_info"])
+        print(links)
+        used_KG.add_links(links)
+
+
+    return used_KG
 #######################################################
 allkg=KnowledgeGraph()
 allkg.add(familykg)
@@ -177,7 +201,8 @@ def filter_longest_lists(nested_list):
 def KG_search(temp_response,KGretrieval_type,k=3):
     
     matches=extractkgsearch(temp_response)
-
+    if len(matches)<1:
+        return ""
     outputpaths=[]
     for extracted_kg_response in matches:
         cleaned_response=cleankgsearch(extracted_kg_response)
@@ -437,15 +462,16 @@ def metric_KG_extraction(extracted_results,golden_jsonl_data):
     coverage=0
     Exactmatch=0
     f1=0
-
+    formaterror=0
     for extract_result,golden_data in zip(extracted_results,golden_jsonl_data):
         total+=1
         goldresponse=str(golden_data[-1]["content"])
         goldquery=golden_data[2]["content"]
         kg_match = re.search(r'\(.*?\)', goldquery)
         goldKG = kg_match.group(0)
-
-        if not "bad_extract" in extract_result:
+        if extract_result=="":
+            formaterror+=1
+        elif not "bad_extract" in extract_result:
             no_hallucination+=1
         goldlinks=extract_links_func(goldKG)
         extract_links=extract_links_func(extract_result)
@@ -456,8 +482,9 @@ def metric_KG_extraction(extracted_results,golden_jsonl_data):
         Exactmatch+=em_sample
         coverage+=coverage_sample
     output=[Exactmatch,f1,no_hallucination,coverage]
-    outputratio=[(value,value/total) for value in output]
-    return total, outputratio
+    no_hallucination_total=total-formaterror
+    outputratio=[Exactmatch/total,f1/total,no_hallucination/no_hallucination_total,coverage/total,formaterror/total]###只在检测到format的时候测试hallucination
+    return total,output, outputratio
 def parse_args():
     """
     解析命令行参数
@@ -482,11 +509,15 @@ def KG_extraction_post(extraction_file_path,KG_retrieval_type,k=3):
 
     ####get metric
     metricresult=metric_KG_extraction(extracted_results,golden_jsonl_data)
-    total,(Exactmatch,f1,no_hallucination,coverage)=metricresult
-    resultdict={"em":Exactmatch[1],
-                "f1":f1[1],
-                "no_hallucination":no_hallucination[1],
-                "coverage":coverage[1]
+    total,outputcounts,(Exactmatch,f1,no_hallucination,coverage,formaterror)=metricresult
+    resultdict={"em":Exactmatch,
+                "f1":f1,
+                "no_hallucination":no_hallucination,
+                "coverage":coverage,
+                "formaterror":formaterror,
+                "counts":outputcounts,
+                "total":total
+
 
     }
     save_json_file([resultdict],f"results/KG_extraction_results/reports/{KG_retrieval_type}/report_{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}_KGmetric.json")
