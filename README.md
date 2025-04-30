@@ -43,7 +43,7 @@ Output file for next step is in ```results/KG_extraction_results/```
 
 args:
 ```
-'--data_path', output file of KG extraction step.
+'--data_path', output file of KG extraction step. If it's not ended with ".json", it will be treated as a folder and we will evaluate all jsons in that folder respectively.
 '--KGretrieval_type', choose from ["exact","relation_retrieval"]. Exact is for greedy search and relation_retrieval is for Relation Retrieval in the paper. Default is "exact".
 '--k', top k for relation retrieval
 ```
