@@ -163,6 +163,16 @@ def load_model(model_name):
         model = LLM(model="Meta-Llama-3.1-8B-Instruct")
         tokenizer = AutoTokenizer.from_pretrained('Meta-Llama-3.1-8B-Instruct')
         return model, tokenizer
+    elif model_name == 'Qwen3-8B':
+        model = LLM(model="Qwen3-8B")
+        tokenizer = AutoTokenizer.from_pretrained('Qwen3-8B')
+        return model, tokenizer
+
+    elif model_name =="Qwen3-4B":
+        model = LLM(model="Qwen3-4B")
+        tokenizer = AutoTokenizer.from_pretrained('Qwen3-4B')
+    
+        return model, tokenizer
     elif model_name == 'gpt-4o':
         client = OpenAI(api_key="", base_url="")
         return client, None

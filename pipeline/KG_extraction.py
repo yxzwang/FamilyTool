@@ -118,6 +118,8 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
         while stop_flag > 0:
             if tokenizer != None:
                 # 编码当前输入
+                if "Qwen3" in model_name:
+                    prompt=prompt+"<think>\n\n</think>\n\n"###no think for qwen3#
                 input_tokens = tokenizer.encode(prompt)
                 total_token_length += len(input_tokens)
                 prompt_token_length += len(input_tokens)
