@@ -8,20 +8,15 @@ from tqdm import tqdm
 from vllm import SamplingParams
 from utils import *
 import time
-def read_json(file_path):
-    """
-    读取标准 JSON 文件，返回数据对象
-    """
-    with open(file_path, 'r', encoding='utf-8') as file:
-        data = json.load(file)  # 解析 JSON 文件并将其转换为 Python 对象（如字典或列表）
-    return data
+from datetime import datetime
+from KG_extraction_post_process_make_intermediate_json import KG_extraction_post
 def get_rewrite_prompt(intent,KG):
     relations=KG.get_relations()
     
     sample_kg_str=    "   ".join([f"- <relationship>{relation}" for relation in relations])
     # print(sample_kg_str)
     instruction = f'''
-You are a helpful AI assistant, and you will assist me in analyzing the Query. When encountering ambiguous intents or things, you need to use the "KG.search" function to retrieve relevant information from the knowledge graph.
+You are a helpful AI assistant, and you will assist me in analyzing the Query. When encountering ambiguous intents or things, you need to use the "KG.search" python function to retrieve relevant information from the knowledge graph.
 
 def KG.search(start: str, path: List[str]) -> List[Tuple[str, str, str]]:
     """Search the knowledge graph for user relationships, locations, preferences, and other relevant information.  
@@ -51,48 +46,35 @@ def KG.search(start: str, path: List[str]) -> List[Tuple[str, str, str]]:
     """
     pass
 
-You should place your output within <output></output> and enclose the KG.search call in <api_call></api_call>.
+
 Below are some examples for reference:
-example1: 
-<intent><speak>Speaker: Bob</speak> I'd like to cancel alarms during my dad's preferred dining time. 
-</intent>
+example 1: 
+User query: <speak>Speaker: Bob</speak> I'd like to cancel alarms during my dad's preferred dining time. 
 
-<output>
-<thought>
-"my dad's preferred dining time" is an ambiguous concept, but the relationships exist in the knowledge graph. Therefore, we will invoke KG.search call.
-</thought>
-<api_call>
+Output:
+
+```python 
 KG.search(start="Bob", path=["<relationship>father","<relationship>prefer_dinnertime"])
-</api_call>
-</output>
+```
 
-example2: 
-<intent>
-<speak>Speaker: Alice</speak> I'd like to book a train ticket from son's preferred city to husband's preferred city.
-</intent>
+example 2: 
+User query: <speak>Speaker: Alice</speak> I'd like to book a train ticket from son's preferred city to husband's preferred city.
 
-<output>
-<thought>
-"son's preferred city" and "husband's preferred city" are two ambiguous concepts, but the relationships exist in the knowledge graph. Therefore, we will invoke two KG.search calls.
-</thought>
-<api_call>
+Output:
+
+```python
 KG.search(start="Alice", path=["<relationship>child","<relationship>prefer_city"])
 KG.search(start="Alice", path=["<relationship>husband","<relationship>prefer_city"])
-</api_call>
-</output>
-
-Explanation of the tags is as follows:
-
-<thought></thought>: Step-by-step thinking about whether ambiguous nouns are included and which tool needs to be called for clarification
-<api_call></api_call>: Making the tool call
+```
 
 Please strictly follow the example format for completion generation, and do not generate any additional content.
 '''
 
-    prompt = f"<intent>\n{intent}\n</intent>\n"
+    prompt = intent
 
     return instruction, prompt
-def model_rewrite(instruction, prompt, model, tokenizer, model_name):
+def model_rewrite(instruction, prompt, model, tokenizer, args):
+    model_name=args.model_name
     # 准备批量输入
     messages = [
         {
@@ -104,6 +86,9 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
             "content": prompt
         }
     ]
+
+    if args.fast_run:
+        return messages
 
     # 初始化生成结果
     response = ""
@@ -118,8 +103,19 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
         while stop_flag > 0:
             if tokenizer != None:
                 # 编码当前输入
-                if "Qwen3" in model_name:
-                    prompt=prompt+"<think>\n\n</think>\n\n"###no think for qwen3#
+                if args.use_template:
+                    messages = [{"role": "user", "content": prompt}]
+                    if "Qwen3" in model_name:
+                        if args.no_think:
+                            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,enable_thinking=False) ### enable_thinking=False to turn off thinking
+                        else:
+                            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                    else:
+                        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                else:
+                    if "Qwen3" in model_name:
+                        if args.no_think:
+                            prompt=prompt+"<think>\n\n</think>\n\n"###no think for qwen3#
                 input_tokens = tokenizer.encode(prompt)
                 total_token_length += len(input_tokens)
                 prompt_token_length += len(input_tokens)
@@ -127,10 +123,9 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
                 # 设置生成参数
                 sampling_params = SamplingParams(
                     temperature=0.7,
-                    top_p=0.8,
+                    # top_p=0.8,
                     repetition_penalty=1.05,
                     max_tokens=4096,
-                    stop=["</output>"]
                 )
 
                 # 执行推理
@@ -144,19 +139,14 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
                 response += temp_response
                 
                 
-                if outputs[0].outputs[0].stop_reason == "</output>":
-                    response += f"</output>" 
-                    prompt += f"{temp_response}</output>"
-                    stop_flag = -1
-                else:
-                    stop_flag = -1
+
+                stop_flag = -1
             else:
                 chat_response = model.chat.completions.create(
                     model=model_name,
                     messages=messages,
                     temperature=0.7,
                     max_tokens=4096,
-                    stop=["</output>"]
                 )
                 print(chat_response)
                 temp_response = chat_response.choices[0].message.content.strip()
@@ -167,12 +157,8 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
                 response += temp_response
                
                 
-                if has_unpaired_tag(response, r'<output>', r'</output>'): # 终止符结束
-                    response += f"</output>" 
-                    messages[-1]["content"] += f"{temp_response}</output>"
-                    stop_flag = -1
-                else:
-                    stop_flag = -1
+
+                stop_flag = -1
 
     except Exception as e:
         # 获取具体的错误行号和文件名
@@ -183,7 +169,14 @@ def model_rewrite(instruction, prompt, model, tokenizer, model_name):
 
 def rewrite_entry(KG, processed_datas,args):
     modelname=args.model_name.replace("/","_")
-    rewrite_result_file = f"results/KG_extraction_results/{time.time()}_{modelname}_intermediate.json"
+    if "Qwen3" in modelname:
+        if args.no_think:
+            no_think="nothink"
+        else:
+            no_think=""
+    else:
+        no_think=""
+    rewrite_result_file = f"results/KG_extraction_results/{datetime.now()}_{modelname}_{args.data_path.split("/")[-1][:-6]}_usetemplate={args.use_template}_{no_think}_intermediate.json"
     rewrite_result = []
 
         
@@ -191,25 +184,60 @@ def rewrite_entry(KG, processed_datas,args):
         # rewrite推理
     model, tokenizer = load_model(args.model_name)
 
-            # 分意图进行处理
-    for data in tqdm(processed_datas,desc="KG extraction path generating..."):
-        # 判断是否需要rewrite
-        instruction, prompt = get_rewrite_prompt(data["query"], KG)
-        response, error, total_token_length, prompt_token_length, completion_token_length = model_rewrite(instruction, prompt, model, tokenizer, args.model_name)
+    sampling_params = SamplingParams(
+        temperature=0.7,
+        # top_p=0.8,
+        repetition_penalty=1.05,
+        max_tokens=4096,
+    )
 
-        data["instruction"] = instruction
-        data["prompt"] = prompt
-        data["response"] = response
-        data["prompt_token_length"] = prompt_token_length
-        data["completion_token_length"] = completion_token_length
-        data["total_token_length"] = total_token_length
-        data["error"] = error
-        rewrite_result.append(data)
+    if args.fast_run:
+        print("fast run")
+        chat_list = []
+        instruction_list, prompt_list = [], []
+        for data in tqdm(processed_datas,desc="KG extraction path generating..."):
+            instruction, prompt = get_rewrite_prompt(data["query"], KG)
+            chat_list.append(model_rewrite(instruction, prompt, model, tokenizer, args))
+            instruction_list.append(instruction)
+            prompt_list.append(prompt)
+        output_list = model.chat(chat_list, sampling_params)
+        for i, output in enumerate(output_list):
+            response = output.outputs[0].text
+            output_tokens = tokenizer.encode(response)
+            input_tokens = tokenizer.encode(prompt_list[i])
+            prompt_token_length = len(input_tokens)
+            total_token_length = len(output_tokens)
+            completion_token_length = len(output_tokens)
+            data = {
+                "instruction": instruction_list[i],
+                "prompt": prompt_list[i],
+                "response": response,
+                "prompt_token_length": prompt_token_length,
+                "completion_token_length": completion_token_length,
+                "total_token_length": total_token_length,
+                "error": ""
+            }
+            rewrite_result.append(data)
+    else:
+            # 分意图进行处理
+        for data in tqdm(processed_datas,desc="KG extraction path generating..."):
+            # 判断是否需要rewrite
+            instruction, prompt = get_rewrite_prompt(data["query"], KG)
+            response, error, total_token_length, prompt_token_length, completion_token_length = model_rewrite(instruction, prompt, model, tokenizer, args)
+
+            data["instruction"] = instruction
+            data["prompt"] = prompt
+            data["response"] = response
+            data["prompt_token_length"] = prompt_token_length
+            data["completion_token_length"] = completion_token_length
+            data["total_token_length"] = total_token_length
+            data["error"] = error
+            rewrite_result.append(data)
     # 释放显存
     # if tokenizer != None:
     #     vllm_release_memory(model)
     save_json_file(rewrite_result, rewrite_result_file)
-    return rewrite_result
+    return rewrite_result,rewrite_result_file
 def transform_query_with_kg(original_query):
     """
     Extract kg information from parentheses and create a new query.
@@ -230,7 +258,7 @@ def transform_query_with_kg(original_query):
         # new_query = f"{sub_query} The extra information for the query is ({kg_info})."
         return sub_query, kg_info
     else:
-        print("未找到括号内的信息")
+        print("no found")
         print(original_query)
         return original_query, ""
 
@@ -257,26 +285,35 @@ def parse_args():
     """
     解析命令行参数
     """
-    parser = argparse.ArgumentParser(description="KG extraction")
+    parser = argparse.ArgumentParser(description="")
 
-    str_to_bool = lambda x: x.lower() == 'true'
 
-    parser.add_argument('--model_name', type=str, default="QwQ-32B",  help="extraction model")  
-    parser.add_argument('--data_path', type=str, default="datasets/MTU-Bench/data_goldenKG.jsonl",  help="goldjsonl path")
-    
+    parser.add_argument('--model_name', type=str, default="Qwen2.5-7B-Instruct",  help="model name")  
+    parser.add_argument('--data_path', type=str, default="datasets/familytool-b.jsonl",  help="goldjsonl path")
+    parser.add_argument('--kg_path', type=str, default="KGs/familykg-b.txt",  help="kg path")
+    parser.add_argument('--k', type=int, default=3, help="top k")
+    parser.add_argument('--KGretrieval_type', type=str, default="exact", help="",choices=["exact","relation_retrieval"])
+    parser.add_argument('--use_template', type=bool,default=True, help="whether to use template")  
+    parser.add_argument('--no_think', action="store_true",default=False, help="for qwen3")  
+    parser.add_argument('--fast_run', action="store_true",default=False, help="for qwen3")  
+    parser.add_argument('--useprompt', type=str, default="new_prompt", help="new prompt or old ones")
     args = parser.parse_args()
 
     return args
+
+
 def main():
     args=parse_args()
     
     ###generate KG extraction path
+    if "no_think" in args.model_name:
+        args.no_think=True
     inputdatas=read_jsonl(args.data_path)
     processed_datas=preprocessdata(inputdatas)
     KG=KnowledgeGraph()
-    KG.loadfromdisk("KGs/familykg.txt")
-    rewrite_results=rewrite_entry(KG,processed_datas,args)
-    pass
+    KG.loadfromdisk(args.kg_path)
+    rewrite_results,extraction_file_path=rewrite_entry(KG,processed_datas,args)
+    KG_extraction_post(extraction_file_path,args.KGretrieval_type,args.data_path,args.kg_path,args)
 
 if __name__=="__main__":
     main()

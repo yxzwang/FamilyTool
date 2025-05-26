@@ -1,40 +1,12 @@
 from utils import KnowledgeGraph
-from KG_extraction import read_json
 from collections import defaultdict
 import re
 import json
 import argparse
-from utils import save_json_file
-familykg=KnowledgeGraph()
-familykg.loadfromdisk("KGs/familykg.txt")
-def extract_links_func(inputstring):
-    inputstring=clean_links(inputstring)
-    # match = re.findall(r'\[(.*?)\]', inputstring)
-    match=re.findall(r'\[([^\[\]]+)\]',inputstring)
-    try:
-        result_list=[]
-        for content in match:
-            newcontent=[item.strip() for item in content.split(",")]
-            result_list.append(newcontent)
-    except:
-        import ipdb
-        ipdb.set_trace()
-    return result_list
+from utils import extract_links_func 
+from utils import save_json_file,read_json
+from utils import lark_config_kgextraction,LarkReport
 
-def clean_links(linkstr:str):
-    return linkstr.replace("\'","").replace("\"","")
-def extract_used_KG(datas):
-    used_KG=KnowledgeGraph()
-    for data in datas:
-        links=extract_links_func(data["kg_info"])
-        print(links)
-        used_KG.add_links(links)
-
-
-    return used_KG
-#######################################################
-allkg=KnowledgeGraph()
-allkg.add(familykg)
 
 
 
@@ -49,7 +21,7 @@ def cleanrelation(outputpath):
     for key,value in relation_mappingdict.items():
         outputpath=outputpath.replace(key,value)
     return outputpath
-def extractpath(start,outputpath):##outputpath is [a,b]
+def extractpath(start,outputpath,allkg):##outputpath is [a,b]
     ###遇到错误需要用retrieval得加上
 
     extract_links=[]
@@ -198,7 +170,12 @@ def filter_longest_lists(nested_list):
         # 筛选出最长的子列表
         longest_lists = [sublist for sublist in nested_list if len(sublist) == max_length]
         return longest_lists
-def KG_search(temp_response,KGretrieval_type,k=3):
+def KG_search(temp_response,KGretrieval_type,kgpath,model_handler=None):
+    familykg=KnowledgeGraph()
+    familykg.loadfromdisk(kgpath)
+    #######################################################
+    allkg=KnowledgeGraph()
+    allkg.add(familykg)
     
     matches=extractkgsearch(temp_response)
     if len(matches)<1:
@@ -212,9 +189,9 @@ def KG_search(temp_response,KGretrieval_type,k=3):
 
         #### relation retrieval.
             if KGretrieval_type=="exact":
-                extracted_paths,extract_sign=extractpath(startentity_output,paths_output)
+                extracted_paths,extract_sign=extractpath(startentity_output,paths_output,allkg)
             elif KGretrieval_type=="relation_retrieval":
-                extracted_paths,extract_sign=extractpath_relationretrieval(startentity_output,paths_output,k)
+                extracted_paths,extract_sign=extractpath_relationretrieval(startentity_output,paths_output,familykg,allkg,model_handler)
 
             if len(extracted_paths)>0:
                 extracted_paths=filter_longest_lists(extracted_paths)
@@ -236,7 +213,7 @@ import numpy as np
 from utils import EmbModelHandlerV2, create_faiss_index
 
 embedding_model_name="jinaai/jina-embeddings-v3"
-model_handler = EmbModelHandlerV2(embedding_model_name)
+
 
 
 import os
@@ -270,7 +247,6 @@ def generate_fakerelationdict(fake_relations,true_relations,model_handler,k=3):
         test_q_embedding = model_handler.get_batch_embeddings([fakerelation])[0]
         test_q_embedding_np = np.array(test_q_embedding).reshape(1, -1)
         top_k_results = search_similar_relations(test_q_embedding_np, index, true_relations, k)
-        # 挑选最相似的且相似度大于0.95的作为捷径解
         fakerelationdict[fakerelation]=top_k_results
     # 释放显存
     
@@ -290,14 +266,15 @@ def generate_true_paths(outputpath,fakerelationdict,true_relations):
     return extracted_true_relation_paths
 
 
-def extractpath_relationretrieval(start,outputpath,k_kgtype=3):
+def extractpath_relationretrieval(start,outputpath,familykg,allkg,model_handler):
     ###get good relation paths
-
+    
 
     all_generated_fake_relations=set()
 
 
     goodrelations=list(familykg.get_relations())
+    k_kgtype=3
     for i,relation in enumerate(outputpath):
         if relation not in goodrelations:
             all_generated_fake_relations.add(relation)
@@ -455,7 +432,7 @@ def changelink2label(goldlinks,extract_links,gold_response):
     return y_true.astype(int),y_pred.astype(int),coverage_sample
 
 
-def metric_KG_extraction(extracted_results,golden_jsonl_data):
+def metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,kgpath):
     total=0
 
     no_hallucination=0
@@ -463,7 +440,16 @@ def metric_KG_extraction(extracted_results,golden_jsonl_data):
     Exactmatch=0
     f1=0
     formaterror=0
-    for extract_result,golden_data in zip(extracted_results,golden_jsonl_data):
+    extracted_results=[]
+    notcoveragesamples=[]
+    if KG_retrieval_type=="exact":
+        model_handler=None
+    else:
+        model_handler=EmbModelHandlerV2(embedding_model_name)
+    for data,golden_data in zip(intermediate_file,golden_jsonl_data):
+
+        extract_result=KG_search(data["response"],KG_retrieval_type,kgpath,model_handler)
+        extracted_results.append(extract_result)
         total+=1
         goldresponse=str(golden_data[-1]["content"])
         goldquery=golden_data[2]["content"]
@@ -475,42 +461,42 @@ def metric_KG_extraction(extracted_results,golden_jsonl_data):
             no_hallucination+=1
         goldlinks=extract_links_func(goldKG)
         extract_links=extract_links_func(extract_result)
-
         y_true,y_pred,coverage_sample=changelink2label(goldlinks,extract_links,goldresponse)
         f1_sample,em_sample=calculate_f1em_score_single_sample(y_true,y_pred)
         f1+=f1_sample
         Exactmatch+=em_sample
+        if em_sample==0:
+            import ipdb
+            # ipdb.set_trace()
+            notcoveragesamples.append({"id":golden_data[0]["content"],"query":goldquery,"response":data["response"],"KG":goldlinks})
         coverage+=coverage_sample
-    output=[Exactmatch,f1,no_hallucination,coverage]
+    output=[Exactmatch,f1,no_hallucination,coverage,formaterror]
+
     no_hallucination_total=total-formaterror
     outputratio=[Exactmatch/total,f1/total,no_hallucination/no_hallucination_total,coverage/total,formaterror/total]###只在检测到format的时候测试hallucination
-    return total,output, outputratio
-def parse_args():
-    """
-    解析命令行参数
-    """
-    parser = argparse.ArgumentParser(description="执行 Two Model 流程")
+    return (total,output, outputratio),extracted_results,notcoveragesamples
 
-    # 使用 lambda 表达式将字符串转换为布尔值
-    str_to_bool = lambda x: x.lower() == 'true'
-    parser.add_argument('--k', type=int, default=3, help="top k")
-    parser.add_argument('--data_path', type=str,default=None,  help="extractresultspath")
-    parser.add_argument('--KGretrieval_type', type=str, default="exact", help="",choices=["exact","relation_retrieval"])
-    args = parser.parse_args()
+def KG_extraction_post(extraction_file_path,KG_retrieval_type,gold_jsonl_path,kgpath,args):
+    lark=LarkReport(**lark_config_kgextraction)
 
-    return args
-def KG_extraction_post(extraction_file_path,KG_retrieval_type,k=3):
     extraction_file_signal=extraction_file_path[:-5].split("/")[-1]
     intermediate_file=read_json(extraction_file_path)
-    extracted_results=[KG_search(data["response"],KG_retrieval_type,k) for data in intermediate_file]
-    golden_jsonl_filepath="datasets/MTU-Bench/data_goldenKG.jsonl"
+    
+    golden_jsonl_filepath=gold_jsonl_path
     golden_jsonl_signal=golden_jsonl_filepath[:-6].split("/")[-1]
     golden_jsonl_data=read_jsonl(golden_jsonl_filepath)
 
     ####get metric
-    metricresult=metric_KG_extraction(extracted_results,golden_jsonl_data)
+    metricresult,extracted_results,notcoveragesamples=metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,kgpath)
     total,outputcounts,(Exactmatch,f1,no_hallucination,coverage,formaterror)=metricresult
-    resultdict={"em":Exactmatch,
+    resultdict={
+
+                "golden_jsonl":golden_jsonl_signal,
+                "extraction_file":extraction_file_signal,
+                "useprompt":args.useprompt,
+                "model_name":args.model_name,
+                "KG_retrieval_type":KG_retrieval_type,
+                "em":Exactmatch,
                 "f1":f1,
                 "no_hallucination":no_hallucination,
                 "coverage":coverage,
@@ -520,7 +506,11 @@ def KG_extraction_post(extraction_file_path,KG_retrieval_type,k=3):
 
 
     }
+
     save_json_file([resultdict],f"results/KG_extraction_results/reports/{KG_retrieval_type}/report_{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}_KGmetric.json")
+    save_json_file(notcoveragesamples,f"results/KG_extraction_results/reports/notcoveragesamples/{KG_retrieval_type}/report_{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}_KGmetric.json")
+    print("sending")
+    lark.send(resultdict)
     print(f"KG extraction metrics saving to {f"results/KG_extraction_results/reports/{KG_retrieval_type}/report_{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}_KGmetric.json"}")
     print(metricresult)
     datawithextracted_KG=[]
@@ -534,17 +524,50 @@ def KG_extraction_post(extraction_file_path,KG_retrieval_type,k=3):
         querydict["content"]=extracted_KG_query
         data[2]=querydict
         datawithextracted_KG.append(data)
-    outputfile=f"datasets/MTU-Bench/intermediate_jsonls/{KG_retrieval_type}/{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}.jsonl"
+
+    if "hard" in golden_jsonl_signal:
+        hardsignal="hard"
+    else:
+        hardsignal="easy"
+    outputfile=f"datasets/intermediate_jsonls/{KG_retrieval_type}/{hardsignal}/{golden_jsonl_signal}_{extraction_file_signal}_{KG_retrieval_type}.jsonl"
     print(f"results saving to {outputfile} for tool-use generation evaluation")
     save_jsonl(datawithextracted_KG,outputfile)
+
+def parse_args():
+    """
+    解析命令行参数
+    """
+    parser = argparse.ArgumentParser(description="执行 Two Model 流程")
+
+ 
+    parser.add_argument('--model_name', type=str, default="Qwen2.5-7B-Instruct",  help="改写模型名称")  
+    parser.add_argument('--data_path', type=str, default="datasets/familytool-b.jsonl",  help="goldjsonl文件path")
+    parser.add_argument('--extracted_data_path', type=str, default="results/KG_extraction_results/base",  help="goldjsonl文件path")
+    parser.add_argument('--kg_path', type=str, default="KGs/familykg-b.txt",  help="kg path")
+    parser.add_argument('--k', type=int, default=3, help="top k")
+    parser.add_argument('--KGretrieval_type', type=str, default="exact", help="",choices=["exact","relation_retrieval"])
+    parser.add_argument('--use_template', type=bool,default=True, help="是否使用模板")  
+    parser.add_argument('--no_think', action="store_true",default=False, help="for qwen3")  
+    parser.add_argument('--useprompt', type=str, default="new_prompt", help="new prompt or old ones")
+    args = parser.parse_args()
+
+    return args
 def main():
     args=parse_args()
+
     KG_retrieval_type=args.KGretrieval_type
-    extraction_path=args.data_path
-    k=args.k
+    extraction_path=args.extracted_data_path
+    if "hard" in extraction_path:
+        args.data_path="datasets/familytool-e.jsonl"
+        args.kg_path="KGs/familykg-e.txt"
+    else:
+        args.data_path="datasets/familytool-b.jsonl"
+        args.kg_path="KGs/familykg-b.txt"
+    gold_jsonl_path=args.data_path
+    kgpath=args.kg_path
     if extraction_path.endswith(".json"):
 
-        KG_extraction_post(extraction_path,KG_retrieval_type,k)
+        KG_extraction_post(extraction_path,KG_retrieval_type,gold_jsonl_path,kgpath,args)
     elif os.path.isdir(extraction_path):
         files = os.listdir(extraction_path)
 
@@ -553,7 +576,7 @@ def main():
         print(json_files)
         for json_file in json_files:
             print(f"extraction for file: {json_file}")
-            KG_extraction_post(json_file,KG_retrieval_type,k)
+            KG_extraction_post(json_file,KG_retrieval_type,gold_jsonl_path,kgpath,args)
     else:
         print("not implemented")
     
