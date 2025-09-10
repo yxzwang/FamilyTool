@@ -179,17 +179,31 @@ def KG_search(temp_response,KGretrieval_type,kgpath,model_handler=None):
     
     matches=extractkgsearch(temp_response)
     if len(matches)<1:
-        return ""
+        return "",0
     outputpaths=[]
+    fakerelationsample=0
     for extracted_kg_response in matches:
         cleaned_response=cleankgsearch(extracted_kg_response)
         startentity_output,paths_output=examinekg_output(cleaned_response)
 
         if paths_output is not None:
-
+            ####check if the relation is in the familykg
+            goodrelations=list(familykg.get_relations())
+            all_generated_fake_relations=set()
+            for i,relation in enumerate(paths_output):
+                if relation not in goodrelations:
+                    all_generated_fake_relations.add(relation)
+            if len(all_generated_fake_relations)>0:
+                fakerelationsample=1
         #### relation retrieval.
             if KGretrieval_type=="exact":
                 extracted_paths,extract_sign=extractpath(startentity_output,paths_output,allkg)
+                # if "bad_extract" in extract_sign:
+                #     print(f"startentity_output: {startentity_output}")
+                #     print(f"paths_output: {paths_output}")
+                #     print(allkg.get_relations())
+                #     import ipdb
+                #     ipdb.set_trace()
             elif KGretrieval_type=="relation_retrieval":
                 extracted_paths,extract_sign=extractpath_relationretrieval(startentity_output,paths_output,familykg,allkg,model_handler)
 
@@ -202,10 +216,18 @@ def KG_search(temp_response,KGretrieval_type,kgpath,model_handler=None):
         else:
             outputpaths.append("")
             
-            outputpaths.append("<bad_extract>")
+            # outputpaths.append("<bad_extract>")
+            # import ipdb
+            # ipdb.set_trace()
 
     outputstr="".join(outputpaths)
-    return outputstr
+    # if "<bad_extract>" in outputstr:
+    #     print(f"startentity_output: {startentity_output}")
+    #     print(f"paths_output: {paths_output}")
+    #     print(allkg.get_relations())
+    #     import ipdb
+    #     ipdb.set_trace()
+    return outputstr,fakerelationsample
 #######################################KG_search#################################    
 #####For path retrieval#############################################################################################    
 from tqdm import tqdm
@@ -247,6 +269,7 @@ def generate_fakerelationdict(fake_relations,true_relations,model_handler,k=3):
         test_q_embedding = model_handler.get_batch_embeddings([fakerelation])[0]
         test_q_embedding_np = np.array(test_q_embedding).reshape(1, -1)
         top_k_results = search_similar_relations(test_q_embedding_np, index, true_relations, k)
+        # 挑选最相似的且相似度大于0.95的作为捷径解
         fakerelationdict[fakerelation]=top_k_results
     # 释放显存
     
@@ -286,6 +309,7 @@ def extractpath_relationretrieval(start,outputpath,familykg,allkg,model_handler)
         outputpath=extracted_true_relation_paths
     else:
         ###不过检索器，加速。
+        # return extractpath(start,outputpath,allkg)
         outputpath=[outputpath]
         pass
 
@@ -296,30 +320,73 @@ def extractpath_relationretrieval(start,outputpath,familykg,allkg,model_handler)
     extracted_relations=[]
     ####extract_links=[["h,r,q"],["h,r,q"],["h,r,q"]]然后不停在后面加入extract_links=[["h,r,q","h,r,q"],["h,r,q","h,r,q"],["h,r,q","h,r,q"]]
     for origpath in outputpath:
-        path=merge_with_previous(origpath)
+        # path=merge_with_previous(origpath)
+        path=origpath
         newpath=[]
         newrelations=[]
-        continuepath=0
         nextstart=start
+        extract_sign=""
+        extract_links=[]
         for i,relation in enumerate(path):
+            if i==0:
+                if not allkg.check_start_entity(start):
+                    return extract_links,extract_sign+"<bad_extract>"
+                else:
+                    candidates=allkg.get_links(start,by="start")
 
+                if f"{start}-{relation}" not in allkg.startrelationdict.keys() or len(allkg.get_by_start_relation(start,relation))<1:
+                    
+                    # extract_links=[[candidate]for candidate in candidates]
+                    # nextstarts=[candidate[-1] for candidate in candidates]
+                    # extract_sign+="<bad_extract>"
 
-            if f"{start}-{relation}" not in allkg.startrelationdict.keys() or len(allkg.get_by_start_relation(nextstart,relation))<1:
-                continue
+                    nextstarts=[]
+                    continue
+                else:
+                    
+                    extract_links=[[allkg.get_by_start_relation(start,relation)[0]]]
+                    nextstarts=[allkg.get_by_start_relation(start,relation)[0][-1]]
+                    
             else:
-                newrelations.append(relation)
-                newpath.append(allkg.get_by_start_relation(nextstart,relation)[0])
-                nextstart=allkg.get_by_start_relation(nextstart,relation)[0][-1]
+        
+                if len(nextstarts)<1:
+                    # extract_sign+="<bad_extract>"
+                    continue
+                for j,nextstart in enumerate(nextstarts):
+                    if not allkg.check_start_entity(nextstart):
+                        # extract_sign+="<bad_extract>"
+                        continue
+                    if f"{nextstart}-{relation}" not in allkg.startrelationdict.keys() or len(allkg.get_by_start_relation(nextstart,relation))<1:
+                        continue
+                        # if "<bad_extract>" not in extract_sign:
+                        #     extract_links[j].extend([link for link in allkg.get_links(nextstart,by="start")])
+                        #     extract_sign+="<bad_extract>"
+                        # else:
+                            
+                        #     continue
+                    else:
+                        extract_links[j].append(allkg.get_by_start_relation(nextstart,relation)[0])
+                        nextstarts[j]=allkg.get_by_start_relation(nextstart,relation)[0][-1]
+
+            # if f"{start}-{relation}" not in allkg.startrelationdict.keys() or len(allkg.get_by_start_relation(nextstart,relation))<1:
+            #     continue
+            # else:
+            #     newrelations.append(relation)
+            #     newpath.append(allkg.get_by_start_relation(nextstart,relation)[0])
+            #     nextstart=allkg.get_by_start_relation(nextstart,relation)[0][-1]
 
         # print(path)
-        if len(newrelations)>0:
-            extracted_relations.append(newrelations)
-            extracted_paths.append(newpath)
+        # if len(newrelations)>0:
+        #     extracted_relations.append(newrelations)
+        extracted_paths.append(extract_links)
 
     drop_duplicatepaths=[] 
     endentitys=[]
     for path in extracted_paths:
-        endentity=path[-1][-1]
+        try:
+            endentity=path[-1][-1]
+        except:
+            continue
         if endentity not in endentitys:
             endentitys.append(endentity)
             drop_duplicatepaths.append(path)
@@ -440,6 +507,7 @@ def metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,k
     Exactmatch=0
     f1=0
     formaterror=0
+    fakerelationsample_count=0
     extracted_results=[]
     notcoveragesamples=[]
     if KG_retrieval_type=="exact":
@@ -448,7 +516,8 @@ def metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,k
         model_handler=EmbModelHandlerV2(embedding_model_name)
     for data,golden_data in zip(intermediate_file,golden_jsonl_data):
 
-        extract_result=KG_search(data["response"],KG_retrieval_type,kgpath,model_handler)
+        extract_result,fakerelationsample=KG_search(data["response"],KG_retrieval_type,kgpath,model_handler)
+        fakerelationsample_count+=fakerelationsample
         extracted_results.append(extract_result)
         total+=1
         goldresponse=str(golden_data[-1]["content"])
@@ -470,10 +539,10 @@ def metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,k
             # ipdb.set_trace()
             notcoveragesamples.append({"id":golden_data[0]["content"],"query":goldquery,"response":data["response"],"KG":goldlinks})
         coverage+=coverage_sample
-    output=[Exactmatch,f1,no_hallucination,coverage,formaterror]
+    output=[Exactmatch,f1,no_hallucination,coverage,formaterror,fakerelationsample_count]
 
     no_hallucination_total=total-formaterror
-    outputratio=[Exactmatch/total,f1/total,no_hallucination/no_hallucination_total,coverage/total,formaterror/total]###只在检测到format的时候测试hallucination
+    outputratio=[Exactmatch/total,f1/total,no_hallucination/no_hallucination_total,coverage/total,formaterror/total,fakerelationsample_count/total]###只在检测到format的时候测试hallucination
     return (total,output, outputratio),extracted_results,notcoveragesamples
 
 def KG_extraction_post(extraction_file_path,KG_retrieval_type,gold_jsonl_path,kgpath,args):
@@ -488,7 +557,7 @@ def KG_extraction_post(extraction_file_path,KG_retrieval_type,gold_jsonl_path,kg
 
     ####get metric
     metricresult,extracted_results,notcoveragesamples=metric_KG_extraction(intermediate_file,golden_jsonl_data,KG_retrieval_type,kgpath)
-    total,outputcounts,(Exactmatch,f1,no_hallucination,coverage,formaterror)=metricresult
+    total,outputcounts,(Exactmatch,f1,no_hallucination,coverage,formaterror,fakerelationsample_count)=metricresult
     resultdict={
 
                 "golden_jsonl":golden_jsonl_signal,
@@ -501,6 +570,7 @@ def KG_extraction_post(extraction_file_path,KG_retrieval_type,gold_jsonl_path,kg
                 "no_hallucination":no_hallucination,
                 "coverage":coverage,
                 "formaterror":formaterror,
+                "fakerelationsample_count":fakerelationsample_count,
                 "counts":outputcounts,
                 "total":total
 
